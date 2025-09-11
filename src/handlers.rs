@@ -1,12 +1,13 @@
 /* src/handlers.rs */
 
 use crate::{
-    acme, response,
+    acme::{self, CommandType},
+    response,
     state::{AppState, DomainStatus},
 };
 use axum::{
     Json,
-    extract::{Path, Query, State}, // Query is new
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -17,24 +18,21 @@ use serde_json::json;
 use std::path::PathBuf;
 use tokio::fs;
 
-/// GET /v1/task - Returns the health status of the background renewal task.
 pub async fn get_task_status(State(state): State<AppState>) -> Response {
     let is_running = *state.task_running.read();
     response::success(Some(json!({ "running": is_running })))
 }
 
-// NEW: Define a struct for query parameters
 #[derive(Deserialize)]
 pub struct CertQuery {
     #[serde(default)]
     wildcard: bool,
 }
 
-/// GET /v1/certificate/{domain} - Returns certificate status or content.
 pub async fn get_certificate(
     State(state): State<AppState>,
     Path(domain): Path<String>,
-    Query(query): Query<CertQuery>, // NEW: Extract query parameters
+    Query(query): Query<CertQuery>,
 ) -> Response {
     let domain_status = state.domains.read().get(domain.trim()).cloned();
 
@@ -44,17 +42,14 @@ pub async fn get_certificate(
             let domain_name = domain.trim();
 
             let paths_to_try: Vec<PathBuf> = if query.wildcard {
-                // If wildcard=true, only try the wildcard path
                 vec![cert_dir.join(format!("_.{}.crt", domain_name))]
             } else {
-                // Otherwise, try wildcard first, then exact match
                 vec![
                     cert_dir.join(format!("_.{}.crt", domain_name)),
                     cert_dir.join(format!("{}.crt", domain_name)),
                 ]
             };
 
-            // Iterate through the paths and try to read the first one that exists
             for path in paths_to_try {
                 if let Ok(content_bytes) = fs::read(&path).await {
                     let encoded_cert = STANDARD.encode(&content_bytes);
@@ -62,7 +57,6 @@ pub async fn get_certificate(
                 }
             }
 
-            // If no path was readable, return an error
             response::error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Certificate file is missing despite being marked as ready.",
@@ -86,11 +80,10 @@ pub async fn get_certificate(
     }
 }
 
-/// GET /v1/certificate/{domain}/key - Returns the private key.
 pub async fn get_certificate_key(
     State(state): State<AppState>,
     Path(domain): Path<String>,
-    Query(query): Query<CertQuery>, // NEW: Extract query parameters
+    Query(query): Query<CertQuery>,
 ) -> Response {
     if !matches!(
         state.domains.read().get(domain.trim()),
@@ -130,7 +123,6 @@ pub struct CreateCertRequest {
     pub dns: String,
 }
 
-/// POST /v1/certificate - Requests a new certificate.
 pub async fn create_certificate(
     State(state): State<AppState>,
     Json(payload): Json<CreateCertRequest>,
@@ -138,15 +130,13 @@ pub async fn create_certificate(
     let domain = payload.domain.trim();
     let dns_provider = payload.dns.trim();
 
-    // --- LOCKING LOGIC ---
     {
         let domains = state.domains.read();
-        // Check 1: Is this specific domain already being processed or ready?
         if let Some(status) = domains.get(domain) {
             match status {
                 DomainStatus::Acquiring => {
                     return response::error(
-                        StatusCode::CONFLICT, // 409 Conflict is more appropriate here
+                        StatusCode::CONFLICT,
                         "Certificate acquisition for this domain is already in progress.",
                     );
                 }
@@ -156,31 +146,26 @@ pub async fn create_certificate(
                         "Certificate for this domain already exists.",
                     );
                 }
-                DomainStatus::Failed(_) => {
-                    // Allow retrying a failed domain, so we proceed
-                }
+                DomainStatus::Failed(_) => {}
             }
         }
 
-        // Check 2: Is there ANY other acquisition process running globally?
         let mut is_acquiring_lock = state.is_acquiring.write();
         if *is_acquiring_lock {
             return response::error(
-                StatusCode::SERVICE_UNAVAILABLE, // 503 is good for temporary unavailability
+                StatusCode::SERVICE_UNAVAILABLE,
                 "Another certificate acquisition is currently in progress. Please try again later.",
             );
         }
-        // If not, acquire the lock
         *is_acquiring_lock = true;
         log(LogLevel::Debug, "Global acquisition lock acquired.");
-    } // Release read/write locks before any .await calls
+    }
 
     let dns_config_path = state
         .config
         .dir_path
         .join(format!("{}.dns.toml", dns_provider));
     if !tokio::fs::metadata(dns_config_path).await.is_ok() {
-        // Important: Release the lock if we fail early
         *state.is_acquiring.write() = false;
         log(
             LogLevel::Debug,
@@ -192,12 +177,12 @@ pub async fn create_certificate(
         );
     }
 
-    // Spawn a background task to handle the actual acquisition
-    tokio::spawn(acme::acquire_certificate(
+    tokio::spawn(acme::acquire_or_renew_certificate(
         state.clone(),
         domain.to_string(),
         dns_provider.to_string(),
-        true, // Persist on success
+        true,
+        CommandType::Run,
     ));
 
     (
