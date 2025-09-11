@@ -1,6 +1,6 @@
 [package]
 name = "lazy-acme"
-version = "1.0.5"
+version = "1.0.6"
 edition = "2024"
 description = "A daemon that keeps your TLS certificates always fresh with Let's Encrypt and lego."
 license = "MIT"
