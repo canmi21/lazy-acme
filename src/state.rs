@@ -22,6 +22,8 @@ pub struct AppState {
     pub task_running: Arc<RwLock<bool>>,
     // Tracks the status of each managed domain.
     pub domains: Arc<RwLock<HashMap<String, DomainStatus>>>,
+    // NEW: A global lock to prevent concurrent certificate acquisitions.
+    pub is_acquiring: Arc<RwLock<bool>>,
 }
 
 impl AppState {
@@ -30,6 +32,8 @@ impl AppState {
             config: Arc::new(config),
             task_running: Arc::new(RwLock::new(false)),
             domains: Arc::new(RwLock::new(HashMap::new())),
+            // NEW: Initialize the lock to false (not acquiring).
+            is_acquiring: Arc::new(RwLock::new(false)),
         }
     }
 }
