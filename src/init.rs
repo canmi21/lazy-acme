@@ -11,10 +11,6 @@ const DEFAULT_CONFIG_TOML: &str = r#"
 # [[domains]]
 # name = "example.com"
 # dns_provider = "cloudflare"
-
-# [[domains]]
-# name = "another.dev"
-# dns_provider = "cloudflare"
 "#;
 
 const DEFAULT_CLOUDFLARE_DNS_TOML: &str = r#"
@@ -36,18 +32,15 @@ email = "your-email@example.com"
 pub async fn initialize_app(config: &AppConfig) -> Result<bool, std::io::Error> {
     let mut is_first_run = false;
 
-    // Create the main data directory
     fs::create_dir_all(&config.dir_path).await?;
     log(
         LogLevel::Debug,
         &format!("Data directory is at: {:?}", config.dir_path),
     );
 
-    // Create the .lego subdirectory
     let lego_path = config.dir_path.join(".lego");
     fs::create_dir_all(&lego_path).await?;
 
-    // Check and create config.toml
     let config_toml_path = config.dir_path.join("config.toml");
     if !path_exists(&config_toml_path).await {
         log(
@@ -58,7 +51,6 @@ pub async fn initialize_app(config: &AppConfig) -> Result<bool, std::io::Error> 
         is_first_run = true;
     }
 
-    // Check and create cloudflare.dns.toml
     let cf_dns_toml_path = config.dir_path.join("cloudflare.dns.toml");
     if !path_exists(&cf_dns_toml_path).await {
         log(
