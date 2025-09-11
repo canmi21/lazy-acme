@@ -10,12 +10,10 @@ use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tokio::signal;
 
-/// Creates the Axum router and runs the HTTP server.
 pub async fn run_server(app_state: AppState) -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/v1/task", get(handlers::get_task_status))
         .route("/v1/certificate", post(handlers::create_certificate))
-        // FIX: Use {domain} instead of :domain for path captures
         .route("/v1/certificate/{domain}", get(handlers::get_certificate))
         .route(
             "/v1/certificate/{domain}/key",
@@ -38,7 +36,6 @@ pub async fn run_server(app_state: AppState) -> Result<(), Box<dyn std::error::E
     Ok(())
 }
 
-/// Listens for shutdown signals (Ctrl+C, SIGTERM)
 async fn shutdown_signal() {
     let ctrl_c = async {
         signal::ctrl_c()
