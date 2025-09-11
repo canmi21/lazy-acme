@@ -7,28 +7,40 @@ use tokio::fs;
 
 const DEFAULT_CONFIG_TOML: &str = r#"
 # This file maps your domains to a DNS provider configuration.
-# Example:
+# The `dns_provider` value should correspond to a `[provider_name].dns.toml` file.
+
 # [[domains]]
 # name = "example.com"
 # dns_provider = "cloudflare"
+
+# [[domains]]
+# name = "another.dev"
+# dns_provider = "cloudflare_zerossl"
 "#;
 
 const DEFAULT_CLOUDFLARE_DNS_TOML: &str = r#"
-# Configuration for the 'cloudflare' DNS provider.
-# You can get your API token from the Cloudflare dashboard.
-# https://dash.cloudflare.com/profile/api-tokens
+# Configuration for a DNS provider, e.g., 'cloudflare'.
+# You can copy this file to create configs for different CAs,
+# e.g., 'cloudflare_zerossl.dns.toml'.
 
-# The command that will be executed by lazy-acme.
-# Placeholders like {{API_KEY}}, {{EMAIL}}, and {{DOMAIN}} will be replaced.
-cmd = "CLOUDFLARE_DNS_API_TOKEN={{API_KEY}} lego --email {{EMAIL}} --dns cloudflare -d '*.{{DOMAIN}}' -d {{DOMAIN}} run"
+# The command to run when initially acquiring a certificate.
+cmd = "CLOUDFLARE_DNS_API_TOKEN={{API_KEY}} lego --email {{EMAIL}} --server {{CA}} --dns cloudflare -d '*.{{DOMAIN}}' -d {{DOMAIN}} run"
+
+# The command to run when renewing a certificate.
+renew = "CLOUDFLARE_DNS_API_TOKEN={{API_KEY}} lego --email {{EMAIL}} --server {{CA}} --dns cloudflare -d '*.{{DOMAIN}}' -d {{DOMAIN}} renew --days 30"
 
 # --- Your Credentials ---
-api_key = "YOUR_CLOUDFLARE_API_TOKEN"
+api_key = "YOUR_CLOUDFLARE_API_TOKEN_HERE"
 email = "your-email@example.com"
+
+# --- Certificate Authority (CA) ---
+# Let's Encrypt (Production): https://acme-v02.api.letsencrypt.org/directory
+# Let's Encrypt (Staging): https://acme-staging-v02.api.letsencrypt.org/directory
+# ZeroSSL (requires EAB): https://acme.zerossl.com/v2/DV90
+# Buypass Go SSL: https://api.buypass.com/acme/directory
+ca = "https://acme-v02.api.letsencrypt.org/directory"
 "#;
 
-/// Checks for necessary directories and config files, creating them if they don't exist.
-/// Returns `Ok(true)` if it's a first-time setup, `Ok(false)` otherwise.
 pub async fn initialize_app(config: &AppConfig) -> Result<bool, std::io::Error> {
     let mut is_first_run = false;
 
@@ -56,7 +68,7 @@ pub async fn initialize_app(config: &AppConfig) -> Result<bool, std::io::Error> 
         log(
             LogLevel::Warn,
             &format!(
-                "Creating default DNS provider config: {:?}",
+                "Creating default DNS provider example: {:?}",
                 cf_dns_toml_path
             ),
         );
@@ -67,7 +79,6 @@ pub async fn initialize_app(config: &AppConfig) -> Result<bool, std::io::Error> 
     Ok(is_first_run)
 }
 
-/// Asynchronously check if a path exists.
 async fn path_exists(path: &Path) -> bool {
     fs::metadata(path).await.is_ok()
 }
