@@ -5,20 +5,34 @@ use crate::{
     state::{AppState, DomainStatus},
 };
 use fancy_log::{LogLevel, log};
-// FIX: Use `fancy_regex` instead of `regex`
 use fancy_regex::Regex;
 use std::path::Path;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
+/// Checks if a certificate key file already exists on disk, supporting both wildcard and non-wildcard names.
 pub async fn certificate_exists(domain: &str, config: &AppConfig) -> bool {
-    let cert_key_path = config
-        .dir_path
-        .join(".lego/certificates")
-        .join(format!("_.{}.key", domain.trim()));
-    tokio::fs::metadata(cert_key_path).await.is_ok()
+    let domain_name = domain.trim();
+    let cert_dir = config.dir_path.join(".lego/certificates");
+
+    // Path for the non-wildcard key
+    let key_path_exact = cert_dir.join(format!("{}.key", domain_name));
+    // Path for the wildcard key
+    let key_path_wildcard = cert_dir.join(format!("_.{}.key", domain_name));
+
+    // Check if either file exists, trying wildcard first as it's more common in our setup.
+    if tokio::fs::metadata(key_path_wildcard).await.is_ok() {
+        return true;
+    }
+    if tokio::fs::metadata(key_path_exact).await.is_ok() {
+        return true;
+    }
+
+    false
 }
+
+/// The core logic to acquire a certificate for a single domain and update state.
 pub async fn acquire_certificate(
     app_state: AppState,
     domain: String,
@@ -27,11 +41,14 @@ pub async fn acquire_certificate(
 ) {
     let config = app_state.config.clone();
     let domain_name = domain.trim();
+
     app_state
         .domains
         .write()
         .insert(domain_name.to_string(), DomainStatus::Acquiring);
+
     let result = do_acquire_certificate(domain_name, &dns_provider, &config).await;
+
     match result {
         Ok(_) => {
             log(
@@ -68,15 +85,13 @@ pub async fn acquire_certificate(
                 .insert(domain_name.to_string(), DomainStatus::Failed(err_msg));
         }
     }
+
     *app_state.is_acquiring.write() = false;
     log(LogLevel::Debug, "Global acquisition lock released.");
 }
 
 /// A helper function to sanitize the command for logging.
-/// It replaces values of assignments before "lego" with asterisks.
 fn sanitize_command_for_log(command: &str) -> String {
-    // FIX: Revert to the powerful regex that uses backreferences and look-aheads,
-    // as it is now supported by the `fancy-regex` crate.
     let re = Regex::new(r#"(?i)([^=\s]+)=(['"]?)[^'"\s]+\2(?=\s+lego)"#).unwrap();
     re.replace_all(command, "$1=***").to_string()
 }
@@ -100,7 +115,6 @@ async fn do_acquire_certificate(
     }
 
     let provider_config = config::load_dns_provider_config(&provider_config_path).await?;
-    // This Regex for placeholder replacement is simple and does not need fancy-regex
     let placeholder_re = ::regex::Regex::new(r"\{\{([a-zA-Z0-9_]+)\}\}")?;
     let mut final_cmd = provider_config.cmd.clone();
 
@@ -129,6 +143,7 @@ async fn do_acquire_certificate(
     execute_lego_command(&final_cmd, &config.dir_path).await
 }
 
+/// Executes the lego command.
 async fn execute_lego_command(
     command: &str,
     working_dir: &Path,
@@ -140,12 +155,14 @@ async fn execute_lego_command(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
     let mut child = cmd.spawn()?;
     let mut stdin = child.stdin.take().expect("Failed to open stdin");
     let stdout = child.stdout.take().expect("Failed to open stdout");
     let stderr = child.stderr.take().expect("Failed to open stderr");
     let mut stdout_reader = BufReader::new(stdout).lines();
     let mut stderr_reader = BufReader::new(stderr).lines();
+
     loop {
         tokio::select! {
             result = stdout_reader.next_line() => {
