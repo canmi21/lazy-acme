@@ -21,7 +21,8 @@ WORKDIR /app
 
 # runtime deps: openssl + certs
 # because lego denps on these, lego itself full static, ldd shows no dynamic link, but who know? it didn't work
-RUN apk add --no-cache openssl ca-certificates
+RUN unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy \
+  && apk add --no-cache openssl ca-certificates
 
 COPY --from=builder /app/lazy-acme ./lazy-acme
 COPY --from=builder /app/lego/bin/lego /usr/bin/lego
