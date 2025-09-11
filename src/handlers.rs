@@ -6,7 +6,7 @@ use crate::{
 };
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State}, // Query is new
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -14,6 +14,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use fancy_log::{LogLevel, log};
 use serde::Deserialize;
 use serde_json::json;
+use std::path::PathBuf;
 use tokio::fs;
 
 /// GET /v1/task - Returns the health status of the background renewal task.
@@ -22,31 +23,50 @@ pub async fn get_task_status(State(state): State<AppState>) -> Response {
     response::success(Some(json!({ "running": is_running })))
 }
 
+// NEW: Define a struct for query parameters
+#[derive(Deserialize)]
+pub struct CertQuery {
+    #[serde(default)]
+    wildcard: bool,
+}
+
 /// GET /v1/certificate/{domain} - Returns certificate status or content.
 pub async fn get_certificate(
     State(state): State<AppState>,
     Path(domain): Path<String>,
+    Query(query): Query<CertQuery>, // NEW: Extract query parameters
 ) -> Response {
     let domain_status = state.domains.read().get(domain.trim()).cloned();
 
     match domain_status {
         Some(DomainStatus::Ready) => {
-            let cert_path = state
-                .config
-                .dir_path
-                .join(".lego/certificates")
-                .join(format!("_.{}.crt", domain.trim()));
+            let cert_dir = state.config.dir_path.join(".lego/certificates");
+            let domain_name = domain.trim();
 
-            match fs::read(cert_path).await {
-                Ok(content_bytes) => {
+            let paths_to_try: Vec<PathBuf> = if query.wildcard {
+                // If wildcard=true, only try the wildcard path
+                vec![cert_dir.join(format!("_.{}.crt", domain_name))]
+            } else {
+                // Otherwise, try wildcard first, then exact match
+                vec![
+                    cert_dir.join(format!("_.{}.crt", domain_name)),
+                    cert_dir.join(format!("{}.crt", domain_name)),
+                ]
+            };
+
+            // Iterate through the paths and try to read the first one that exists
+            for path in paths_to_try {
+                if let Ok(content_bytes) = fs::read(&path).await {
                     let encoded_cert = STANDARD.encode(&content_bytes);
-                    response::success(Some(json!({ "certificate_base64": encoded_cert })))
+                    return response::success(Some(json!({ "certificate_base64": encoded_cert })));
                 }
-                Err(_) => response::error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Certificate file is missing after being marked as ready.",
-                ),
             }
+
+            // If no path was readable, return an error
+            response::error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Certificate file is missing despite being marked as ready.",
+            )
         }
         Some(DomainStatus::Acquiring) => (
             StatusCode::ACCEPTED,
@@ -70,30 +90,38 @@ pub async fn get_certificate(
 pub async fn get_certificate_key(
     State(state): State<AppState>,
     Path(domain): Path<String>,
+    Query(query): Query<CertQuery>, // NEW: Extract query parameters
 ) -> Response {
-    if matches!(
+    if !matches!(
         state.domains.read().get(domain.trim()),
         Some(DomainStatus::Ready)
     ) {
-        let key_path = state
-            .config
-            .dir_path
-            .join(".lego/certificates")
-            .join(format!("_.{}.key", domain.trim()));
-
-        match fs::read(key_path).await {
-            Ok(content_bytes) => {
-                let encoded_key = STANDARD.encode(&content_bytes);
-                response::success(Some(json!({ "key_base64": encoded_key })))
-            }
-            Err(_) => response::error(StatusCode::INTERNAL_SERVER_ERROR, "Key file is missing."),
-        }
-    } else {
-        response::error(
+        return response::error(
             StatusCode::NOT_FOUND,
             "Certificate is not ready or does not exist.",
-        )
+        );
     }
+
+    let cert_dir = state.config.dir_path.join(".lego/certificates");
+    let domain_name = domain.trim();
+
+    let paths_to_try: Vec<PathBuf> = if query.wildcard {
+        vec![cert_dir.join(format!("_.{}.key", domain_name))]
+    } else {
+        vec![
+            cert_dir.join(format!("_.{}.key", domain_name)),
+            cert_dir.join(format!("{}.key", domain_name)),
+        ]
+    };
+
+    for path in paths_to_try {
+        if let Ok(content_bytes) = fs::read(&path).await {
+            let encoded_key = STANDARD.encode(&content_bytes);
+            return response::success(Some(json!({ "key_base64": encoded_key })));
+        }
+    }
+
+    response::error(StatusCode::INTERNAL_SERVER_ERROR, "Key file is missing.")
 }
 
 #[derive(Deserialize)]
