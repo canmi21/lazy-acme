@@ -21,7 +21,7 @@ pub async fn run_server(app_state: AppState) -> Result<(), Box<dyn std::error::E
         )
         .with_state(app_state.clone());
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], app_state.config.bind_port));
+    let addr = SocketAddr::from(([0, 0, 0, 0], app_state.config.bind_port));
     let listener = TcpListener::bind(&addr).await?;
 
     log(
