@@ -1,5 +1,5 @@
 services:
-  lazy-mmdb:
+  lazy-acme:
     image: canmi/lazy-acme:latest
     container_name: lazy-acme
     networks:
