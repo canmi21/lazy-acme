@@ -10,8 +10,8 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-// NEW: Import the Base64 engine
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use fancy_log::{LogLevel, log};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::fs;
@@ -37,12 +37,9 @@ pub async fn get_certificate(
                 .join(".lego/certificates")
                 .join(format!("_.{}.crt", domain.trim()));
 
-            // MODIFIED: Read raw bytes instead of a string
             match fs::read(cert_path).await {
                 Ok(content_bytes) => {
-                    // MODIFIED: Base64 encode the bytes
                     let encoded_cert = STANDARD.encode(&content_bytes);
-                    // MODIFIED: Return the encoded string under a new key
                     response::success(Some(json!({ "certificate_base64": encoded_cert })))
                 }
                 Err(_) => response::error(
@@ -84,12 +81,9 @@ pub async fn get_certificate_key(
             .join(".lego/certificates")
             .join(format!("_.{}.key", domain.trim()));
 
-        // MODIFIED: Read raw bytes
         match fs::read(key_path).await {
             Ok(content_bytes) => {
-                // MODIFIED: Base64 encode the bytes
                 let encoded_key = STANDARD.encode(&content_bytes);
-                // MODIFIED: Return the encoded string under a new key
                 response::success(Some(json!({ "key_base64": encoded_key })))
             }
             Err(_) => response::error(StatusCode::INTERNAL_SERVER_ERROR, "Key file is missing."),
@@ -116,24 +110,61 @@ pub async fn create_certificate(
     let domain = payload.domain.trim();
     let dns_provider = payload.dns.trim();
 
-    if acme::certificate_exists(domain, &state.config).await {
-        return response::error(
-            StatusCode::BAD_REQUEST,
-            "Certificate for this domain already exists.",
-        );
-    }
+    // --- LOCKING LOGIC ---
+    {
+        let domains = state.domains.read();
+        // Check 1: Is this specific domain already being processed or ready?
+        if let Some(status) = domains.get(domain) {
+            match status {
+                DomainStatus::Acquiring => {
+                    return response::error(
+                        StatusCode::CONFLICT, // 409 Conflict is more appropriate here
+                        "Certificate acquisition for this domain is already in progress.",
+                    );
+                }
+                DomainStatus::Ready => {
+                    return response::error(
+                        StatusCode::BAD_REQUEST,
+                        "Certificate for this domain already exists.",
+                    );
+                }
+                DomainStatus::Failed(_) => {
+                    // Allow retrying a failed domain, so we proceed
+                }
+            }
+        }
+
+        // Check 2: Is there ANY other acquisition process running globally?
+        let mut is_acquiring_lock = state.is_acquiring.write();
+        if *is_acquiring_lock {
+            return response::error(
+                StatusCode::SERVICE_UNAVAILABLE, // 503 is good for temporary unavailability
+                "Another certificate acquisition is currently in progress. Please try again later.",
+            );
+        }
+        // If not, acquire the lock
+        *is_acquiring_lock = true;
+        log(LogLevel::Debug, "Global acquisition lock acquired.");
+    } // Release read/write locks before any .await calls
 
     let dns_config_path = state
         .config
         .dir_path
         .join(format!("{}.dns.toml", dns_provider));
     if !tokio::fs::metadata(dns_config_path).await.is_ok() {
+        // Important: Release the lock if we fail early
+        *state.is_acquiring.write() = false;
+        log(
+            LogLevel::Debug,
+            "DNS config not found, releasing global acquisition lock.",
+        );
         return response::error(
             StatusCode::BAD_REQUEST,
             "Specified DNS provider configuration not found.",
         );
     }
 
+    // Spawn a background task to handle the actual acquisition
     tokio::spawn(acme::acquire_certificate(
         state.clone(),
         domain.to_string(),
