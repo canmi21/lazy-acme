@@ -1,0 +1,25 @@
+[package]
+name = "lazy-acme"
+version = "1.0.0"
+edition = "2024"
+description = "A daemon that keeps your TLS certificates always fresh with Let's Encrypt and lego."
+license = "MIT"
+repository = "https://github.com/canmi21/lazy-acme"
+readme = "README.md"
+keywords = ["network", "server", "unix", "acme", "ssl"]
+categories = ["network-programming", "web-programming", "development-tools"]
+
+[[bin]]
+name = "lazy-acme"
+path = "src/main.rs"
+
+[dependencies]
+dirs = "6"
+dotenvy = "0.15"
+fancy-log = "0.1"
+lazy-motd = "1"
+parking_lot = "0.12"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
