@@ -46,7 +46,7 @@ impl AppConfig {
     }
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct DomainEntry {
     pub name: String,
     pub dns_provider: String,
@@ -61,11 +61,11 @@ pub struct DomainConfig {
 #[derive(Deserialize, Debug)]
 pub struct DnsProviderConfig {
     pub cmd: String,
+    pub renew: Option<String>,
     #[serde(flatten)]
     pub vars: toml::map::Map<String, toml::Value>,
 }
 
-// FIX: Make the error type Send + Sync
 pub async fn load_domain_config(
     path: &Path,
 ) -> Result<DomainConfig, Box<dyn std::error::Error + Send + Sync>> {
@@ -73,7 +73,6 @@ pub async fn load_domain_config(
     Ok(toml::from_str(&content)?)
 }
 
-// FIX: Make the error type Send + Sync
 pub async fn load_dns_provider_config(
     path: &Path,
 ) -> Result<DnsProviderConfig, Box<dyn std::error::Error + Send + Sync>> {
@@ -81,7 +80,6 @@ pub async fn load_dns_provider_config(
     Ok(toml::from_str(&content)?)
 }
 
-/// Safely adds a new domain entry to the config.toml file.
 pub async fn add_domain_to_config(
     config_path: &Path,
     domain: &str,
