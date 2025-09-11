@@ -5,13 +5,13 @@ use crate::{
     state::{AppState, DomainStatus},
 };
 use fancy_log::{LogLevel, log};
-use regex::Regex;
+// FIX: Use `fancy_regex` instead of `regex`
+use fancy_regex::Regex;
 use std::path::Path;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
-/// Checks if a certificate key file already exists on disk.
 pub async fn certificate_exists(domain: &str, config: &AppConfig) -> bool {
     let cert_key_path = config
         .dir_path
@@ -19,28 +19,19 @@ pub async fn certificate_exists(domain: &str, config: &AppConfig) -> bool {
         .join(format!("_.{}.key", domain.trim()));
     tokio::fs::metadata(cert_key_path).await.is_ok()
 }
-
-/// The core logic to acquire a certificate for a single domain and update state.
-/// This is designed to be called from a background task.
 pub async fn acquire_certificate(
     app_state: AppState,
     domain: String,
     dns_provider: String,
-    persist: bool, // If true, save to config.toml on success
+    persist: bool,
 ) {
     let config = app_state.config.clone();
     let domain_name = domain.trim();
-
-    // 1. Set status to Acquiring
     app_state
         .domains
         .write()
         .insert(domain_name.to_string(), DomainStatus::Acquiring);
-
-    // 2. Run the acquisition process
     let result = do_acquire_certificate(domain_name, &dns_provider, &config).await;
-
-    // 3. Update status based on the result
     match result {
         Ok(_) => {
             log(
@@ -51,7 +42,6 @@ pub async fn acquire_certificate(
                 .domains
                 .write()
                 .insert(domain_name.to_string(), DomainStatus::Ready);
-            // 4. Persist to config.toml if requested
             if persist {
                 let config_path = config.dir_path.join("config.toml");
                 if let Err(e) = add_domain_to_config(&config_path, domain_name, &dns_provider).await
@@ -78,6 +68,17 @@ pub async fn acquire_certificate(
                 .insert(domain_name.to_string(), DomainStatus::Failed(err_msg));
         }
     }
+    *app_state.is_acquiring.write() = false;
+    log(LogLevel::Debug, "Global acquisition lock released.");
+}
+
+/// A helper function to sanitize the command for logging.
+/// It replaces values of assignments before "lego" with asterisks.
+fn sanitize_command_for_log(command: &str) -> String {
+    // FIX: Revert to the powerful regex that uses backreferences and look-aheads,
+    // as it is now supported by the `fancy-regex` crate.
+    let re = Regex::new(r#"(?i)([^=\s]+)=(['"]?)[^'"\s]+\2(?=\s+lego)"#).unwrap();
+    re.replace_all(command, "$1=***").to_string()
 }
 
 /// Internal helper that contains the actual command-building and execution logic.
@@ -86,7 +87,6 @@ async fn do_acquire_certificate(
     dns_provider: &str,
     config: &AppConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // <-- FIX: Make error Send + Sync
     let provider_config_path = config
         .dir_path
         .join(format!("{}.dns.toml", dns_provider.trim()));
@@ -98,11 +98,13 @@ async fn do_acquire_certificate(
         )
         .into());
     }
+
     let provider_config = config::load_dns_provider_config(&provider_config_path).await?;
-    let re = Regex::new(r"\{\{([a-zA-Z0-9_]+)\}\}")?;
+    // This Regex for placeholder replacement is simple and does not need fancy-regex
+    let placeholder_re = ::regex::Regex::new(r"\{\{([a-zA-Z0-9_]+)\}\}")?;
     let mut final_cmd = provider_config.cmd.clone();
 
-    for cap in re.captures_iter(&provider_config.cmd) {
+    for cap in placeholder_re.captures_iter(&provider_config.cmd) {
         let placeholder = &cap[0];
         let key = &cap[1];
         let value = if key.eq_ignore_ascii_case("DOMAIN") {
@@ -117,19 +119,20 @@ async fn do_acquire_certificate(
         };
         final_cmd = final_cmd.replace(placeholder, &value);
     }
+
+    let sanitized_cmd = sanitize_command_for_log(&final_cmd);
     log(
         LogLevel::Debug,
-        &format!("Executing command: {}", final_cmd),
+        &format!("Executing command: {}", sanitized_cmd),
     );
+
     execute_lego_command(&final_cmd, &config.dir_path).await
 }
 
-/// Executes the lego command, handles interactive prompts, and streams output.
 async fn execute_lego_command(
     command: &str,
     working_dir: &Path,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // <-- FIX: Make error Send + Sync
     let mut cmd = Command::new("sh");
     cmd.arg("-c")
         .arg(command)
@@ -137,14 +140,12 @@ async fn execute_lego_command(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-
     let mut child = cmd.spawn()?;
     let mut stdin = child.stdin.take().expect("Failed to open stdin");
     let stdout = child.stdout.take().expect("Failed to open stdout");
     let stderr = child.stderr.take().expect("Failed to open stderr");
     let mut stdout_reader = BufReader::new(stdout).lines();
     let mut stderr_reader = BufReader::new(stderr).lines();
-
     loop {
         tokio::select! {
             result = stdout_reader.next_line() => {
