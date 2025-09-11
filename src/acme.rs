@@ -15,6 +15,9 @@ use tokio::{
 };
 use x509_parser::prelude::*;
 
+#[cfg(target_os = "linux")]
+use shlex;
+
 pub async fn certificate_exists(domain: &str, config: &AppConfig) -> bool {
     let domain_name = domain.trim();
     let cert_dir = config.dir_path.join(".lego/certificates");
@@ -161,10 +164,63 @@ async fn execute_lego_command(
     command: &str,
     working_dir: &Path,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut cmd = Command::new("sh");
-    cmd.arg("-c")
-        .arg(command)
-        .current_dir(working_dir)
+    let mut cmd: Command;
+
+    #[cfg(target_os = "macos")]
+    {
+        log(
+            LogLevel::Debug,
+            "macOS detected. Using shell execution strategy.",
+        );
+        cmd = Command::new("sh");
+        cmd.arg("-c").arg(command);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let lego_path = Path::new("/usr/bin/lego");
+        if lego_path.exists() {
+            log(
+                LogLevel::Debug,
+                "Linux detected and /usr/bin/lego found. Using direct execution strategy.",
+            );
+            let parts =
+                shlex::split(command).ok_or_else(|| "shlex failed to parse command".to_string())?;
+
+            let lego_pos = parts
+                .iter()
+                .position(|p| p.ends_with("lego"))
+                .ok_or_else(|| "'lego' not found in command".to_string())?;
+
+            cmd = Command::new(lego_path);
+            cmd.args(&parts[lego_pos + 1..]);
+
+            for part in &parts[..lego_pos] {
+                if let Some((key, value)) = part.split_once('=') {
+                    cmd.env(key, value);
+                }
+            }
+        } else {
+            log(
+                LogLevel::Info,
+                "Linux detected but /usr/bin/lego not found. Falling back to shell execution.",
+            );
+            cmd = Command::new("sh");
+            cmd.arg("-c").arg(command);
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        log(
+            LogLevel::Info,
+            "Unsupported OS detected. Using default shell execution strategy.",
+        );
+        cmd = Command::new("sh");
+        cmd.arg("-c").arg(command);
+    }
+
+    cmd.current_dir(working_dir)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -202,6 +258,7 @@ async fn execute_lego_command(
                 let exit_status = status?;
                 if exit_status.success() {
                     log(LogLevel::Info, "Lego command finished successfully.");
+                    break;
                 } else {
                     let err_msg = format!("Lego command failed with status: {}", exit_status);
                     log(LogLevel::Error, &err_msg);
@@ -220,7 +277,6 @@ pub async fn needs_renewal(
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     let domain_name = domain.trim();
     let cert_dir = config.dir_path.join(".lego/certificates");
-
     let cert_path = find_cert_file(domain_name, &cert_dir)
         .await
         .ok_or("Certificate file not found for renewal check.")?;
@@ -228,17 +284,14 @@ pub async fn needs_renewal(
     let cert_data = fs::read(&cert_path).await?;
     let pem = ::pem::parse(&cert_data)?;
     let (_, x509_cert) = X509Certificate::from_der(pem.contents())?;
-
     let not_after_str = x509_cert
         .validity()
         .not_after
         .to_rfc2822()
         .map_err(|e| e.to_string())?;
     let expiry_date = DateTime::parse_from_rfc2822(&not_after_str)?.with_timezone(&Utc);
-
     let now = Utc::now();
     let threshold = chrono::Duration::days(days_before_expiry);
-
     let needs_renew = expiry_date - now < threshold;
     if needs_renew {
         log(
