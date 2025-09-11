@@ -1,13 +1,13 @@
 /* src/tasks.rs */
 
 use crate::{
-    acme, config,
+    acme::{self, CommandType},
+    config,
     state::{AppState, DomainStatus},
 };
 use fancy_log::{LogLevel, log};
 use tokio::time;
 
-/// Spawns the initial startup task to check certificates from config.toml.
 pub fn spawn_startup_check_task(app_state: AppState) {
     tokio::spawn(async move {
         log(LogLevel::Info, "Starting initial certificate check...");
@@ -21,11 +21,10 @@ pub fn spawn_startup_check_task(app_state: AppState) {
                     LogLevel::Error,
                     &format!("Failed to load domain config on startup: {}", e),
                 );
-                return; // Cannot proceed
+                return;
             }
         };
 
-        // Populate the initial state for domains that already have certificates
         for domain in &domain_config.domains {
             let domain_name = domain.name.trim().to_string();
             if acme::certificate_exists(&domain_name, &config).await {
@@ -36,20 +35,19 @@ pub fn spawn_startup_check_task(app_state: AppState) {
             }
         }
 
-        // Now, start acquisition for any missing certs
         let mut all_successful = true;
-        for domain in domain_config.domains {
+        let domains_to_check = domain_config.domains.clone();
+        for domain in domains_to_check {
             let domain_name = domain.name.trim();
             if !acme::certificate_exists(domain_name, &config).await {
-                // This call will run in the foreground of this task and block its progress
-                acme::acquire_certificate(
+                acme::acquire_or_renew_certificate(
                     app_state.clone(),
-                    domain.name.clone(), // <-- FIX: Clone the string to move it
-                    domain.dns_provider.clone(), // <-- FIX: Clone the string to move it
-                    false,               // Do not persist, it's already in the config
+                    domain.name.clone(),
+                    domain.dns_provider.clone(),
+                    false,
+                    CommandType::Run,
                 )
                 .await;
-                // Check the result after the attempt
                 if let Some(DomainStatus::Failed(_)) = app_state.domains.read().get(domain_name) {
                     all_successful = false;
                 }
@@ -74,7 +72,6 @@ pub fn spawn_startup_check_task(app_state: AppState) {
     });
 }
 
-/// Spawns the background task that periodically checks certificate status.
 fn spawn_periodic_renewal_task(app_state: AppState) {
     tokio::spawn(async move {
         log(
@@ -85,7 +82,7 @@ fn spawn_periodic_renewal_task(app_state: AppState) {
             ),
         );
         let mut interval = time::interval(app_state.config.update_interval);
-        interval.tick().await; // Wait for the first interval
+        interval.tick().await;
 
         loop {
             interval.tick().await;
@@ -93,7 +90,57 @@ fn spawn_periodic_renewal_task(app_state: AppState) {
                 LogLevel::Info,
                 "Running scheduled certificate renewal check...",
             );
-            // TODO: Implement the logic to check SSL certificate expiry and renew if necessary.
+
+            let config_path = app_state.config.dir_path.join("config.toml");
+            let domain_config = match config::load_domain_config(&config_path).await {
+                Ok(c) => c,
+                Err(e) => {
+                    log(
+                        LogLevel::Error,
+                        &format!("Renewal task: Failed to load config.toml: {}", e),
+                    );
+                    continue;
+                }
+            };
+
+            for domain_entry in domain_config.domains {
+                let domain_name = domain_entry.name.trim();
+
+                if *app_state.is_acquiring.read() {
+                    log(
+                        LogLevel::Warn,
+                        "Another task is already running, postponing renewal check cycle.",
+                    );
+                    break;
+                }
+
+                match acme::needs_renewal(domain_name, &app_state.config, 30).await {
+                    Ok(true) => {
+                        log(
+                            LogLevel::Warn,
+                            &format!("Proceeding with renewal for '{}'...", domain_name),
+                        );
+
+                        *app_state.is_acquiring.write() = true;
+
+                        acme::acquire_or_renew_certificate(
+                            app_state.clone(),
+                            domain_name.to_string(),
+                            domain_entry.dns_provider,
+                            false,
+                            CommandType::Renew,
+                        )
+                        .await;
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        log(
+                            LogLevel::Error,
+                            &format!("Error checking renewal status for '{}': {}", domain_name, e),
+                        );
+                    }
+                }
+            }
         }
     });
 }
