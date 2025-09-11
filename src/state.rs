@@ -5,24 +5,18 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Represents the current status of a domain's certificate.
 #[derive(Clone, Debug)]
 pub enum DomainStatus {
-    Acquiring,      // Certificate acquisition is in progress.
-    Ready,          // Certificate is available.
-    Failed(String), // Acquisition failed with an error message.
+    Acquiring,
+    Ready,
+    Failed(String),
 }
 
-/// The global, thread-safe state for the entire application.
 #[derive(Clone)]
 pub struct AppState {
-    // The loaded application config, shared across all tasks.
     pub config: Arc<AppConfig>,
-    // Tracks whether the periodic renewal task is active.
     pub task_running: Arc<RwLock<bool>>,
-    // Tracks the status of each managed domain.
     pub domains: Arc<RwLock<HashMap<String, DomainStatus>>>,
-    // NEW: A global lock to prevent concurrent certificate acquisitions.
     pub is_acquiring: Arc<RwLock<bool>>,
 }
 
@@ -32,7 +26,6 @@ impl AppState {
             config: Arc::new(config),
             task_running: Arc::new(RwLock::new(false)),
             domains: Arc::new(RwLock::new(HashMap::new())),
-            // NEW: Initialize the lock to false (not acquiring).
             is_acquiring: Arc::new(RwLock::new(false)),
         }
     }
