@@ -1,6 +1,9 @@
 /* src/acme.rs */
 
-use crate::config::{self, AppConfig, DomainEntry};
+use crate::{
+    config::{self, AppConfig, add_domain_to_config},
+    state::{AppState, DomainStatus},
+};
 use fancy_log::{LogLevel, log};
 use regex::Regex;
 use std::path::Path;
@@ -8,114 +11,112 @@ use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
-/// The main entry point for the startup certificate check.
-pub async fn check_and_acquire_certs_on_startup(
-    config: &AppConfig,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let domain_config_path = config.dir_path.join("config.toml");
-    let domain_config = config::load_domain_config(&domain_config_path).await?;
-
-    if domain_config.domains.is_empty() {
-        log(
-            LogLevel::Info,
-            "No domains configured in config.toml, skipping certificate check.",
-        );
-        return Ok(());
-    }
-
-    log(
-        LogLevel::Info,
-        &format!("Found {} domain(s) to check.", domain_config.domains.len()),
-    );
-
-    for domain_entry in &domain_config.domains {
-        let domain_name = domain_entry.name.trim();
-
-        if certificate_exists_for_domain(domain_name, config).await {
-            log(
-                LogLevel::Info,
-                &format!("Certificate found for '{}'.", domain_name),
-            );
-        } else {
-            log(
-                LogLevel::Warn,
-                &format!(
-                    "Certificate NOT found for '{}'. Attempting to acquire...",
-                    domain_name
-                ),
-            );
-            acquire_certificate(domain_entry, config).await?;
-        }
-    }
-
-    Ok(())
-}
-
-/// Checks if a certificate file exists for the given domain.
-async fn certificate_exists_for_domain(domain: &str, config: &AppConfig) -> bool {
-    // --- THE FINAL FIX ---
-    // The format string must be "_.{domain}.key" to match lego's output.
-    // My previous version was missing the dot after the underscore.
+/// Checks if a certificate key file already exists on disk.
+pub async fn certificate_exists(domain: &str, config: &AppConfig) -> bool {
     let cert_key_path = config
         .dir_path
         .join(".lego/certificates")
-        .join(format!("_.{}.key", domain)); // <-- CORRECTED LINE
-
-    let metadata_result = tokio::fs::metadata(&cert_key_path).await;
-    log(
-        LogLevel::Debug,
-        &format!(
-            "Metadata check for {:?}: {:?}",
-            cert_key_path, metadata_result
-        ),
-    );
-
-    metadata_result.is_ok()
+        .join(format!("_.{}.key", domain.trim()));
+    tokio::fs::metadata(cert_key_path).await.is_ok()
 }
 
-/// Handles the full process of acquiring a certificate for a single domain.
-async fn acquire_certificate(
-    domain: &DomainEntry,
-    config: &AppConfig,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let trimmed_domain_name = domain.name.trim();
+/// The core logic to acquire a certificate for a single domain and update state.
+/// This is designed to be called from a background task.
+pub async fn acquire_certificate(
+    app_state: AppState,
+    domain: String,
+    dns_provider: String,
+    persist: bool, // If true, save to config.toml on success
+) {
+    let config = app_state.config.clone();
+    let domain_name = domain.trim();
 
+    // 1. Set status to Acquiring
+    app_state
+        .domains
+        .write()
+        .insert(domain_name.to_string(), DomainStatus::Acquiring);
+
+    // 2. Run the acquisition process
+    let result = do_acquire_certificate(domain_name, &dns_provider, &config).await;
+
+    // 3. Update status based on the result
+    match result {
+        Ok(_) => {
+            log(
+                LogLevel::Info,
+                &format!("Successfully acquired certificate for '{}'", domain_name),
+            );
+            app_state
+                .domains
+                .write()
+                .insert(domain_name.to_string(), DomainStatus::Ready);
+            // 4. Persist to config.toml if requested
+            if persist {
+                let config_path = config.dir_path.join("config.toml");
+                if let Err(e) = add_domain_to_config(&config_path, domain_name, &dns_provider).await
+                {
+                    log(
+                        LogLevel::Error,
+                        &format!("Failed to persist domain to config.toml: {}", e),
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            let err_msg = e.to_string();
+            log(
+                LogLevel::Error,
+                &format!(
+                    "Failed to acquire certificate for '{}': {}",
+                    domain_name, err_msg
+                ),
+            );
+            app_state
+                .domains
+                .write()
+                .insert(domain_name.to_string(), DomainStatus::Failed(err_msg));
+        }
+    }
+}
+
+/// Internal helper that contains the actual command-building and execution logic.
+async fn do_acquire_certificate(
+    domain: &str,
+    dns_provider: &str,
+    config: &AppConfig,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // <-- FIX: Make error Send + Sync
     let provider_config_path = config
         .dir_path
-        .join(format!("{}.dns.toml", domain.dns_provider.trim()));
+        .join(format!("{}.dns.toml", dns_provider.trim()));
 
     if !provider_config_path.exists() {
-        let err_msg = format!(
-            "DNS provider config not found for '{}' at {:?}.",
-            domain.dns_provider, provider_config_path
-        );
-        log(LogLevel::Error, &err_msg);
-        return Err(err_msg.into());
+        return Err(format!(
+            "DNS provider config not found at {:?}",
+            provider_config_path
+        )
+        .into());
     }
-
     let provider_config = config::load_dns_provider_config(&provider_config_path).await?;
-
     let re = Regex::new(r"\{\{([a-zA-Z0-9_]+)\}\}")?;
     let mut final_cmd = provider_config.cmd.clone();
 
     for cap in re.captures_iter(&provider_config.cmd) {
         let placeholder = &cap[0];
-        let key_from_placeholder = &cap[1];
-
-        let value = if key_from_placeholder.eq_ignore_ascii_case("DOMAIN") {
-            trimmed_domain_name.to_string()
+        let key = &cap[1];
+        let value = if key.eq_ignore_ascii_case("DOMAIN") {
+            domain.to_string()
         } else {
             provider_config
                 .vars
                 .iter()
-                .find(|(toml_key, _)| toml_key.eq_ignore_ascii_case(key_from_placeholder))
-                .and_then(|(_, toml_value)| toml_value.as_str().map(ToString::to_string))
-                .unwrap_or_else(|| "".to_string())
+                .find(|(k, _)| k.eq_ignore_ascii_case(key))
+                .and_then(|(_, v)| v.as_str().map(ToString::to_string))
+                .unwrap_or_default()
         };
-
         final_cmd = final_cmd.replace(placeholder, &value);
     }
-
     log(
         LogLevel::Debug,
         &format!("Executing command: {}", final_cmd),
@@ -127,21 +128,20 @@ async fn acquire_certificate(
 async fn execute_lego_command(
     command: &str,
     working_dir: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // <-- FIX: Make error Send + Sync
     let mut cmd = Command::new("sh");
-    cmd.arg("-c").arg(command);
-    cmd.current_dir(working_dir);
-
-    cmd.stdin(Stdio::piped());
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
+    cmd.arg("-c")
+        .arg(command)
+        .current_dir(working_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
     let mut child = cmd.spawn()?;
-
     let mut stdin = child.stdin.take().expect("Failed to open stdin");
     let stdout = child.stdout.take().expect("Failed to open stdout");
     let stderr = child.stderr.take().expect("Failed to open stderr");
-
     let mut stdout_reader = BufReader::new(stdout).lines();
     let mut stderr_reader = BufReader::new(stderr).lines();
 
@@ -172,12 +172,12 @@ async fn execute_lego_command(
                 if exit_status.success() {
                     log(LogLevel::Info, "Lego command finished successfully.");
                 } else {
-                    log(LogLevel::Error, &format!("Lego command failed with status: {}", exit_status));
-                    return Err(format!("Lego process exited with non-zero status: {}", exit_status).into());
+                    let err_msg = format!("Lego command failed with status: {}", exit_status);
+                    log(LogLevel::Error, &err_msg);
+                    return Err(err_msg.into());
                 }
             }
         }
     }
-
     Ok(())
 }
