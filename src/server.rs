@@ -1,17 +1,29 @@
 /* src/server.rs */
 
-use crate::config::AppConfig;
-use axum::{Router, routing::get};
+use crate::{handlers, state::AppState};
+use axum::{
+    Router,
+    routing::{get, post},
+};
 use fancy_log::{LogLevel, log};
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tokio::signal;
 
 /// Creates the Axum router and runs the HTTP server.
-pub async fn run_server(config: AppConfig) -> Result<(), Box<dyn std::error::Error>> {
-    let app = Router::new().route("/", get(hello_world_handler));
+pub async fn run_server(app_state: AppState) -> Result<(), Box<dyn std::error::Error>> {
+    let app = Router::new()
+        .route("/v1/task", get(handlers::get_task_status))
+        .route("/v1/certificate", post(handlers::create_certificate))
+        // FIX: Use {domain} instead of :domain for path captures
+        .route("/v1/certificate/{domain}", get(handlers::get_certificate))
+        .route(
+            "/v1/certificate/{domain}/key",
+            get(handlers::get_certificate_key),
+        )
+        .with_state(app_state.clone());
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], config.bind_port));
+    let addr = SocketAddr::from(([127, 0, 0, 1], app_state.config.bind_port));
     let listener = TcpListener::bind(&addr).await?;
 
     log(
@@ -19,18 +31,11 @@ pub async fn run_server(config: AppConfig) -> Result<(), Box<dyn std::error::Err
         &format!("HTTP Server listening on: http://{}", addr),
     );
 
-    // Run the server with a graceful shutdown signal.
-    axum::serve(listener, app)
+    axum::serve(listener, app.into_make_service())
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 
     Ok(())
-}
-
-/// The handler for the "/" route.
-async fn hello_world_handler() -> &'static str {
-    log(LogLevel::Info, "Received a request for /");
-    "Hello World"
 }
 
 /// Listens for shutdown signals (Ctrl+C, SIGTERM)
