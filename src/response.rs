@@ -22,7 +22,6 @@ pub struct PublicErrorResponse {
     timestamp: String,
 }
 
-// 2xx
 pub fn success(data: Option<serde_json::Value>) -> Response {
     let response = PublicSuccessResponse {
         status: "Success".to_string(),
@@ -32,7 +31,6 @@ pub fn success(data: Option<serde_json::Value>) -> Response {
     (StatusCode::OK, Json(response)).into_response()
 }
 
-// 4xx, 5xx
 pub fn error(status: StatusCode, message: impl Into<String>) -> Response {
     let response = PublicErrorResponse {
         status: "Error".to_string(),
