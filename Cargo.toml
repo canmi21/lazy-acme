@@ -14,6 +14,7 @@ name = "lazy-acme"
 path = "src/main.rs"
 
 [dependencies]
+axum = "0.8"
 dirs = "6"
 dotenvy = "0.15"
 fancy-log = "0.1"
@@ -22,4 +23,7 @@ parking_lot = "0.12"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+shellexpand = "3"
 tokio = { version = "1", features = ["full"] }
+toml = "0.8"
+regex = "1"
