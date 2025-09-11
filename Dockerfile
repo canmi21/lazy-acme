@@ -5,8 +5,8 @@ WORKDIR /app
 COPY . .
 
 RUN unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy \
-  && apt-get update && apt-get install -y musl-tools pkg-config libssl-dev wget jq tar \
-  && ./build.sh "$TARGETARCH" \
+  && apt-get update && apt-get install -y musl-tools pkg-config libssl-dev curl wget bash jq tar \
+  && bash ./build.sh "$TARGETARCH" \
   && case "$TARGETARCH" in \
         "amd64") rustup target add x86_64-unknown-linux-musl \
                 && cargo build --release --target x86_64-unknown-linux-musl \
